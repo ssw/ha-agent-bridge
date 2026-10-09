@@ -108,7 +108,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     app = FastAPI(
         title="Home bridge",
-        version="0.1.0",
+        version="0.2.0",
         description=DESCRIPTION,
         servers=[{"url": settings.public_url}],
         lifespan=lifespan,
@@ -181,14 +181,27 @@ def create_app(settings: Settings) -> FastAPI:
         return {"status": "ok"}
 
     @app.get("/v1/areas", summary="List rooms and how many visible entities each has")
-    async def areas(profile: Agent) -> list[dict[str, Any]]:
+    async def areas(
+        profile: Agent,
+        include_diagnostic: Annotated[
+            bool,
+            Query(
+                description=(
+                    "Also list diagnostic and configuration entities (battery "
+                    "voltages, firmware, identify buttons). They are always "
+                    "readable directly and through history."
+                )
+            ),
+        ] = False,
+    ) -> list[dict[str, Any]]:
         catalog = await ha.catalog()
         out = []
         for area_id, name in sorted(catalog.areas.items(), key=lambda kv: kv[1]):
             visible = [
                 e
                 for e in catalog.entities_in(area_id)
-                if readable(profile, catalog, e) and e not in catalog.hidden
+                if readable(profile, catalog, e)
+                and catalog.listed(e, include_diagnostic)
             ]
             domains = sorted({e.split(".", 1)[0] for e in visible})
             out.append(
@@ -213,6 +226,16 @@ def create_app(settings: Settings) -> FastAPI:
         ] = None,
         limit: Annotated[int, Query(ge=1, le=500)] = 200,
         offset: Annotated[int, Query(ge=0)] = 0,
+        include_diagnostic: Annotated[
+            bool,
+            Query(
+                description=(
+                    "Also list diagnostic and configuration entities (battery "
+                    "voltages, firmware, identify buttons). They are always "
+                    "readable directly and through history."
+                )
+            ),
+        ] = False,
     ) -> dict[str, Any]:
         catalog = await ha.catalog()
         area_id = None
@@ -223,7 +246,9 @@ def create_app(settings: Settings) -> FastAPI:
         rows = []
         for raw in await ha.states():
             entity_id = raw["entity_id"]
-            if not readable(profile, catalog, entity_id) or entity_id in catalog.hidden:
+            if not readable(profile, catalog, entity_id) or not catalog.listed(
+                entity_id, include_diagnostic
+            ):
                 continue
             if area_id and catalog.entity_area.get(entity_id) != area_id:
                 continue

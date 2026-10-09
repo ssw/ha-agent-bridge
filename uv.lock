@@ -7,7 +7,7 @@ exclude-newer = "2026-09-25T00:00:00Z"
 
 [[package]]
 name = "agent-bridge"
-version = "0.1.0"
+version = "0.2.0"
 source = { virtual = "." }
 dependencies = [
     { name = "fastapi" },

@@ -27,6 +27,14 @@ class Catalog:
     entity_area: dict[str, str]  # entity_id -> area_id (entity's own, else device's)
     entity_integration: dict[str, str]  # entity_id -> integration (platform)
     hidden: frozenset[str]  # entities hidden in HA
+    # Diagnostic and configuration entities (battery voltages, firmware,
+    # identify buttons...): left out of listings unless asked for.
+    auxiliary: frozenset[str] = frozenset()
+
+    def listed(self, entity_id: str, include_diagnostic: bool) -> bool:
+        if entity_id in self.hidden:
+            return False
+        return include_diagnostic or entity_id not in self.auxiliary
 
     def area_id_for(self, name_or_id: str) -> str | None:
         if name_or_id in self.areas:
@@ -162,6 +170,11 @@ class HA:
             entity_area=entity_area,
             entity_integration={e["entity_id"]: e.get("platform") for e in entities},
             hidden=frozenset(e["entity_id"] for e in entities if e.get("hidden_by")),
+            auxiliary=frozenset(
+                e["entity_id"]
+                for e in entities
+                if e.get("entity_category") in ("diagnostic", "config")
+            ),
         )
         self._catalog_at = time.monotonic()
         return self._catalog

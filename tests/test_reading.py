@@ -155,3 +155,38 @@ def test_services_show_exactly_what_can_be_done(client):
     assert services["cover.close_cover"]["entities"] == ["cover.baby_south_shade"]
     assert services["switch.turn_on"]["entities"] == ["switch.baby_humidifier"]
     assert not any(s.startswith("lock.") for s in services)
+
+
+def test_listings_leave_out_diagnostic_and_config_entities(client):
+    areas = {a["name"]: a for a in client.get("/v1/areas", headers=MUSE).json()}
+    # baby: temperature, shade, humidifier; not the shade's battery or identify
+    assert areas["baby"]["entities"] == 3
+    assert areas["baby"]["domains"] == ["cover", "sensor", "switch"]
+    listed = client.get(
+        "/v1/entities", params={"area": "baby", "domain": "sensor"}, headers=MUSE
+    ).json()
+    assert [e["entity_id"] for e in listed["entities"]] == [
+        "sensor.baby_room_sensor_temperature"
+    ]
+
+
+def test_diagnostic_entities_are_available_on_request(client):
+    everything = client.get(
+        "/v1/entities",
+        params={"area": "baby", "include_diagnostic": "true"},
+        headers=MUSE,
+    ).json()
+    ids = {e["entity_id"] for e in everything["entities"]}
+    assert {
+        "sensor.baby_south_shade_battery",
+        "button.baby_south_shade_identify",
+    } <= ids
+    areas = client.get(
+        "/v1/areas", params={"include_diagnostic": "true"}, headers=MUSE
+    ).json()
+    assert next(a for a in areas if a["name"] == "baby")["entities"] == 5
+    # and always readable directly, e.g. "how are the shade batteries?"
+    battery = client.get(
+        "/v1/entities/sensor.baby_south_shade_battery", headers=MUSE
+    ).json()
+    assert battery["state"] == "92"

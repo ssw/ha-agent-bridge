@@ -123,6 +123,22 @@ def scenario(now: datetime) -> House:
                 {"friendly_name": "Garage Light"},
             ),
             Entity(
+                "sensor.baby_south_shade_battery",
+                "92",
+                "matter",
+                "nursery",
+                {"friendly_name": "South Shade Battery", "unit_of_measurement": "%"},
+                category="diagnostic",
+            ),
+            Entity(
+                "button.baby_south_shade_identify",
+                "unknown",
+                "matter",
+                "nursery",
+                {"friendly_name": "South Shade Identify"},
+                category="config",
+            ),
+            Entity(
                 "cover.baby_south_shade",
                 "open",
                 "matter",

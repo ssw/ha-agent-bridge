@@ -32,6 +32,7 @@ class Entity:
     attributes: dict[str, Any] = field(default_factory=dict)
     hidden: bool = False
     device_id: str | None = None
+    category: str | None = None  # entity_category: diagnostic / config
 
 
 @dataclass
@@ -224,6 +225,7 @@ class FakeHA:
                     "area_id": e.area_id,
                     "device_id": e.device_id,
                     "hidden_by": "user" if e.hidden else None,
+                    "entity_category": e.category,
                 }
                 for e in self.house.entities
             ]

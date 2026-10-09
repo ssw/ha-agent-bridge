@@ -37,13 +37,17 @@ policy:
 ```
 GET  /openapi.json                       no token needed
 GET  /v1/areas
-GET  /v1/entities?area=&domain=&q=
+GET  /v1/entities?area=&domain=&q=&include_diagnostic=
 GET  /v1/entities/{entity_id}
 GET  /v1/history?entity_id=&start=-12h&end=now&bucket=1h
 GET  /v1/logbook?start=-24h
 GET  /v1/services                        what this agent may do, with limits
 POST /v1/services/{domain}/{service}     {"entity_id" | "area", "data"}
 ```
+
+Listings leave out Home Assistant's diagnostic and configuration entities
+(battery voltages, firmware, identify buttons) unless `include_diagnostic=true`;
+they stay readable directly and through history.
 
 Times accept `now`, relative offsets like `-12h` / `-7d`, or ISO 8601 (local
 time when no offset is given). Ranges older than 10 days are served from HA's
