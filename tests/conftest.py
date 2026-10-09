@@ -14,44 +14,59 @@ from fastapi.testclient import TestClient
 from tests.fake_ha import HA_TOKEN, Entity, FakeHA, House
 
 MUSE_TOKEN = "muse-token-0123456789abcdef"
+TABLET_TOKEN = "tablet-token-0123456789abcdef"
 READER_TOKEN = "reader-token-0123456789abcdef"
 OFF_TOKEN = "off-token-0123456789abcdef"
 
 POLICY = f"""
 enabled = true
 
-[profiles.muse]
-token_sha256 = ["{token_hash(MUSE_TOKEN)}"]
-writes_per_hour = 5
-
-[profiles.muse.read]
+[policies.home-control.read]
 exclude_domains = ["person", "device_tracker"]
 exclude_integrations = ["mobile_app"]
 
-[[profiles.muse.allow]]
+[[policies.home-control.allow]]
 services = ["light.turn_on", "light.turn_off", "light.toggle"]
 entities = {{ domains = ["light"] }}
 data = {{ brightness_pct = [0, 100], transition = [0, 10] }}
 
-[[profiles.muse.allow]]
+[[policies.home-control.allow]]
 services = ["cover.open_cover", "cover.close_cover", "cover.set_cover_position"]
 entities = {{ domains = ["cover"], exclude = ["cover.garage_garage_door"] }}
 data = {{ position = [0, 100] }}
 
-[[profiles.muse.allow]]
+[[policies.home-control.allow]]
 services = ["climate.set_temperature", "climate.set_hvac_mode", "climate.set_fan_mode"]
 entities = {{ domains = ["climate"] }}
 data = {{ temperature = [65, 78], hvac_mode = ["off", "heat", "cool", "heat_cool"], fan_mode = "any" }}
 
-[[profiles.muse.allow]]
+[[policies.home-control.allow]]
 services = ["switch.turn_on", "switch.turn_off"]
 entities = {{ ids = ["switch.baby_humidifier"] }}
 
-[profiles.reader]
-token_sha256 = ["{token_hash(READER_TOKEN)}"]
+[policies.read-only.read]
+exclude_domains = ["person", "device_tracker"]
+exclude_integrations = ["mobile_app"]
 
-[profiles.off]
-token_sha256 = ["{token_hash(OFF_TOKEN)}"]
+# Two tokens share home-control and must stay distinguishable.
+[tokens.sam-muse]
+sha256 = "{token_hash(MUSE_TOKEN)}"
+policy = "home-control"
+writes_per_hour = 5
+note = "Muse custom connector"
+
+[tokens.kitchen-tablet]
+sha256 = "{token_hash(TABLET_TOKEN)}"
+policy = "home-control"
+writes_per_hour = 5
+
+[tokens.reader]
+sha256 = "{token_hash(READER_TOKEN)}"
+policy = "read-only"
+
+[tokens.retired]
+sha256 = "{token_hash(OFF_TOKEN)}"
+policy = "home-control"
 enabled = false
 """
 
@@ -271,5 +286,6 @@ def auth(token: str) -> dict[str, str]:
 
 
 MUSE = auth(MUSE_TOKEN)
+TABLET = auth(TABLET_TOKEN)
 READER = auth(READER_TOKEN)
 OFF = auth(OFF_TOKEN)

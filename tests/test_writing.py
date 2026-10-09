@@ -31,7 +31,8 @@ def test_dim_a_light(client, ha):
         (
             "agent_bridge_call",
             {
-                "agent": "muse",
+                "token": "sam-muse",
+                "policy": "home-control",
                 "service": "light.turn_on",
                 "entities": ["light.big_general_downlights"],
                 "data": {"brightness_pct": 40},
@@ -151,7 +152,7 @@ def test_read_only_profile_cannot_write(client, ha):
 
 def test_write_rate_limit(ha):
     ha.reset()
-    with bridge(ha, POLICY) as client:  # muse may write 5 times an hour
+    with bridge(ha, POLICY) as client:  # sam-muse may write 5 times an hour
         codes = [
             call(client, "light.toggle", entity_id="light.garage_light").status_code
             for _ in range(6)

@@ -3,7 +3,7 @@
 import pytest
 from agent_bridge.policy import PolicyError, parse
 
-from tests.conftest import MUSE, OFF, POLICY, auth, bridge
+from tests.conftest import MUSE, OFF, POLICY, READER, TABLET, auth, bridge
 
 
 def test_missing_or_wrong_token_is_rejected_and_alerted(client, ha):
@@ -14,7 +14,7 @@ def test_missing_or_wrong_token_is_rejected_and_alerted(client, ha):
     assert "bad token" in alert["message"]
 
 
-def test_a_disabled_profile_blocks_reads_too(client):
+def test_a_disabled_token_blocks_reads_too(client):
     resp = client.get("/v1/entities", headers=OFF)
     assert resp.status_code == 403
     assert resp.json() == {"detail": "agent access is disabled"}
@@ -31,7 +31,14 @@ def test_the_global_kill_switch_blocks_everything(ha):
         assert resp.status_code == 403
 
 
-RULE = '[profiles.a]\n[[profiles.a.allow]]\nservices = ["{service}"]\n{rest}'
+RULE = '[policies.a]\n[[policies.a.allow]]\nservices = ["{service}"]\n{rest}'
+TOKEN = "[policies.p]\n[tokens.t]\n{body}"
+HEX = "0" * 64
+TWO_TOKENS = (
+    "[policies.p]\n"
+    f'[tokens.a]\nsha256 = "{HEX}"\npolicy = "p"\n'
+    f'[tokens.b]\nsha256 = "{HEX}"\npolicy = "p"'
+)
 
 
 @pytest.mark.parametrize(
@@ -55,8 +62,21 @@ RULE = '[profiles.a]\n[[profiles.a.allow]]\nservices = ["{service}"]\n{rest}'
             ),
             "targets can't be data fields",
         ),
-        ('[profiles.a]\ntoken_sha256 = ["nothex"]', "sha256"),
-        ("[profiles.a]\nwrites = 5", "unknown key"),
+        (TOKEN.format(body='sha256 = "nothex"\npolicy = "p"'), "sha256"),
+        (
+            TOKEN.format(body=f'sha256 = "{HEX}"\npolicy = "p"\nwrites = 5'),
+            "unknown key",
+        ),
+        (
+            TOKEN.format(body=f'sha256 = "{HEX}"\npolicy = "nope"'),
+            "no policy 'nope' \\(have: p\\)",
+        ),
+        (
+            TWO_TOKENS,
+            "same sha256",
+        ),
+        ("[policies.Home]", "lowercase letters"),
+        ("[profiles.muse]\ntoken_sha256 = []", "unknown key"),  # the old format
         (
             RULE.format(
                 service="light.turn_on",
@@ -72,3 +92,52 @@ def test_invalid_policies_are_refused_with_a_reason(policy, message):
         PolicyError, match=message.replace("[", r"\[").replace("]", r"\]")
     ):
         parse(policy)
+
+
+def test_tokens_sharing_a_policy_are_told_apart(client, ha):
+    for headers in (MUSE, TABLET):
+        client.post(
+            "/v1/services/light/turn_on",
+            json={"entity_id": "light.garage_light"},
+            headers=headers,
+        )
+    assert [(e["token"], e["policy"]) for _, e in ha.events] == [
+        ("sam-muse", "home-control"),
+        ("kitchen-tablet", "home-control"),
+    ]
+
+
+def test_denial_alerts_name_the_token(client, ha):
+    client.post(
+        "/v1/services/lock/unlock",
+        json={"entity_id": "lock.entryway_front_door_lock"},
+        headers=TABLET,
+    )
+    (alert,) = ha.service_calls("persistent_notification.create")
+    assert alert["message"].startswith("kitchen-tablet: denied lock.unlock")
+
+
+def test_write_limits_are_per_token(ha):
+    ha.reset()
+    with bridge(ha) as client:
+
+        def toggle(headers):
+            return client.post(
+                "/v1/services/light/toggle",
+                json={"entity_id": "light.garage_light"},
+                headers=headers,
+            ).status_code
+
+        assert [toggle(MUSE) for _ in range(6)] == [200] * 5 + [429]
+        assert toggle(TABLET) == 200  # its own allowance
+
+
+def test_disabling_a_policy_blocks_every_token_using_it(ha):
+    off = POLICY.replace(
+        "[policies.home-control.read]",
+        "[policies.home-control]\nenabled = false\n\n[policies.home-control.read]",
+    )
+    with bridge(ha, off) as client:
+        assert client.get("/v1/areas", headers=MUSE).status_code == 403
+        assert client.get("/v1/areas", headers=TABLET).status_code == 403
+        assert client.get("/v1/areas", headers=READER).status_code == 200

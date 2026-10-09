@@ -1,25 +1,31 @@
-"""The access policy: which agents may read and change what.
+"""Access configuration: named policies (what is allowed) and named tokens
+(who is calling, and which policy applies to them).
 
-The policy is TOML. Reads are broad with exclusions; writes are an explicit
+The file is TOML. Reads are broad with exclusions; writes are an explicit
 allowlist of services, entities and data constraints. Anything not allowed is
 denied.
 
     enabled = true                    # global kill switch (blocks reads too)
 
-    [profiles.muse]
-    token_sha256 = ["<hex>"]          # hashes of this agent's bearer tokens
-    enabled = true
-    writes_per_hour = 60
+    [policies.home-control]
+    enabled = true                    # disables every token using this policy
 
-    [profiles.muse.read]
+    [policies.home-control.read]
     exclude_domains = ["person", "device_tracker"]
     exclude_integrations = ["mobile_app"]
     exclude_entities = []
 
-    [[profiles.muse.allow]]
+    [[policies.home-control.allow]]
     services = ["light.turn_on", "light.turn_off"]
     entities = { domains = ["light"], ids = [], exclude = [] }
     data = { brightness_pct = [0, 100], hvac_mode = ["off", "heat"], x = "any" }
+
+    [tokens.sam-muse]
+    sha256 = "<hex>"                  # hash of the bearer token; never the token
+    policy = "home-control"
+    enabled = true
+    writes_per_hour = 60              # per token
+    note = "Muse custom connector"
 """
 
 from __future__ import annotations
@@ -143,11 +149,11 @@ class ReadPolicy:
 
 
 @dataclass(frozen=True)
-class Profile:
+class AccessPolicy:
+    """What a caller may read and change."""
+
     name: str
-    token_hashes: frozenset[str]
     enabled: bool = True
-    writes_per_hour: int = 60
     read: ReadPolicy = field(default_factory=ReadPolicy)
     rules: tuple[Rule, ...] = ()
 
@@ -180,52 +186,77 @@ class Profile:
 
 
 @dataclass(frozen=True)
-class Policy:
-    enabled: bool
-    profiles: dict[str, Profile]
+class Token:
+    """Who is calling: one named bearer token and the policy it gets."""
 
-    def profile_for_token(self, token: str) -> Profile | None:
-        digest = token_hash(token)
+    name: str
+    sha256: str
+    policy: str
+    enabled: bool = True
+    writes_per_hour: int = 60
+    note: str = ""
+
+
+@dataclass(frozen=True)
+class AccessConfig:
+    enabled: bool
+    policies: dict[str, AccessPolicy]
+    tokens: dict[str, Token]
+
+    def token_for(self, secret: str) -> Token | None:
+        digest = token_hash(secret)
         found = None
-        for profile in self.profiles.values():
-            for known in profile.token_hashes:
-                # Check every hash so timing doesn't reveal which matched.
-                if hmac.compare_digest(digest, known):
-                    found = profile
+        for token in self.tokens.values():
+            # Check every hash so timing doesn't reveal which matched.
+            if hmac.compare_digest(digest, token.sha256):
+                found = token
         return found
 
+    def policy_for(self, token: Token) -> AccessPolicy:
+        return self.policies[token.policy]
 
-def parse(text: str) -> Policy:
+    def active(self, token: Token) -> bool:
+        """The global, policy and token kill switches all allow access."""
+        return self.enabled and token.enabled and self.policy_for(token).enabled
+
+
+_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+
+def parse(text: str) -> AccessConfig:
     try:
         raw = tomllib.loads(text)
     except tomllib.TOMLDecodeError as err:
         raise PolicyError(f"invalid TOML: {err}") from err
-    _only_keys(raw, {"enabled", "profiles"}, "policy")
-    profiles = {
-        name: _profile(name, spec)
-        for name, spec in _table(raw.get("profiles", {}), "profiles").items()
+    _only_keys(raw, {"enabled", "policies", "tokens"}, "top level")
+    policies = {
+        name: _policy(name, spec)
+        for name, spec in _table(raw.get("policies", {}), "policies").items()
     }
-    hashes = [h for p in profiles.values() for h in p.token_hashes]
+    tokens = {
+        name: _token(name, spec, policies)
+        for name, spec in _table(raw.get("tokens", {}), "tokens").items()
+    }
+    hashes = [t.sha256 for t in tokens.values()]
     if len(hashes) != len(set(hashes)):
-        raise PolicyError("the same token hash appears in more than one profile")
-    return Policy(enabled=_bool(raw.get("enabled", True), "enabled"), profiles=profiles)
-
-
-def _profile(name: str, spec: Any) -> Profile:
-    where = f"profiles.{name}"
-    spec = _table(spec, where)
-    _only_keys(
-        spec, {"token_sha256", "enabled", "writes_per_hour", "read", "allow"}, where
+        raise PolicyError("two tokens have the same sha256")
+    return AccessConfig(
+        enabled=_bool(raw.get("enabled", True), "enabled"),
+        policies=policies,
+        tokens=tokens,
     )
-    hashes = _strings(spec.get("token_sha256", []), f"{where}.token_sha256")
-    for h in hashes:
-        if not _HEX64_RE.match(h):
-            raise PolicyError(
-                f"{where}.token_sha256: not a lowercase sha256 hex digest"
-            )
-    writes = spec.get("writes_per_hour", 60)
-    if isinstance(writes, bool) or not isinstance(writes, int) or writes < 0:
-        raise PolicyError(f"{where}.writes_per_hour must be a non-negative integer")
+
+
+def _name(name: str, where: str) -> None:
+    if not _NAME_RE.match(name):
+        raise PolicyError(f"{where}: names use lowercase letters, digits, '-' and '_'")
+
+
+def _policy(name: str, spec: Any) -> AccessPolicy:
+    where = f"policies.{name}"
+    _name(name, where)
+    spec = _table(spec, where)
+    _only_keys(spec, {"enabled", "read", "allow"}, where)
     read = _table(spec.get("read", {}), f"{where}.read")
     _only_keys(
         read,
@@ -235,11 +266,9 @@ def _profile(name: str, spec: Any) -> Profile:
     rules = spec.get("allow", [])
     if not isinstance(rules, list):
         raise PolicyError(f"{where}.allow must be an array of tables ([[...allow]])")
-    return Profile(
+    return AccessPolicy(
         name=name,
-        token_hashes=frozenset(hashes),
         enabled=_bool(spec.get("enabled", True), f"{where}.enabled"),
-        writes_per_hour=writes,
         read=ReadPolicy(
             exclude_domains=frozenset(
                 _strings(
@@ -259,6 +288,34 @@ def _profile(name: str, spec: Any) -> Profile:
             ),
         ),
         rules=tuple(_rule(r, f"{where}.allow[{i}]") for i, r in enumerate(rules)),
+    )
+
+
+def _token(name: str, spec: Any, policies: dict[str, AccessPolicy]) -> Token:
+    where = f"tokens.{name}"
+    _name(name, where)
+    spec = _table(spec, where)
+    _only_keys(spec, {"sha256", "policy", "enabled", "writes_per_hour", "note"}, where)
+    digest = spec.get("sha256")
+    if not isinstance(digest, str) or not _HEX64_RE.match(digest):
+        raise PolicyError(f"{where}.sha256: not a lowercase sha256 hex digest")
+    policy = spec.get("policy")
+    if policy not in policies:
+        known = ", ".join(sorted(policies)) or "none defined"
+        raise PolicyError(f"{where}.policy: no policy {policy!r} (have: {known})")
+    writes = spec.get("writes_per_hour", 60)
+    if isinstance(writes, bool) or not isinstance(writes, int) or writes < 0:
+        raise PolicyError(f"{where}.writes_per_hour must be a non-negative integer")
+    note = spec.get("note", "")
+    if not isinstance(note, str):
+        raise PolicyError(f"{where}.note must be a string")
+    return Token(
+        name=name,
+        sha256=digest,
+        policy=policy,
+        enabled=_bool(spec.get("enabled", True), f"{where}.enabled"),
+        writes_per_hour=writes,
+        note=note,
     )
 
 

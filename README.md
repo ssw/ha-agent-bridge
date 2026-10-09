@@ -25,12 +25,11 @@ policy:
   Out-of-range values are rejected, not adjusted. Unknown data fields are
   rejected. Room targets are expanded and each entity is checked, so "close
   everything in the garage" can't reach a garage door the policy excludes.
-- **Per-agent tokens** map to separate policy profiles; only SHA-256 hashes are
-  stored.
+- **Named tokens** each point at a named policy; only SHA-256 hashes are stored,
+  and every log line, event and alert says which token was used.
 - **Audit**: every request is logged; every write fires an
   `agent_bridge_call` event in HA; denied writes and bad tokens raise an alert.
-- **Kill switch**: `enabled = false` globally or per profile blocks reads and
-  writes.
+- **Kill switches** globally, per policy or per token; they block reads too.
 
 ## API
 
@@ -55,18 +54,27 @@ long-term statistics.
 
 ## Policy
 
-TOML, set in the add-on's `policy` option. See the docstring at the top of
-[`policy.py`](agent_bridge/src/agent_bridge/policy.py) for the format. A minimal
-read-only agent:
+TOML, set in the add-on's `policy` option. **Policies** say what is allowed;
+**tokens** say who is calling and which policy they get. Several tokens can
+share a policy and still be told apart in logs, events and alerts. See the
+docstring at the top of [`policy.py`](agent_bridge/src/agent_bridge/policy.py)
+for the full format. A read-only agent:
 
 ```toml
-[profiles.reader]
-token_sha256 = ["<sha256 hex of the agent's token>"]
-
-[profiles.reader.read]
+[policies.read-only.read]
 exclude_domains = ["person", "device_tracker"]
 exclude_integrations = ["mobile_app"]
+
+[tokens.my-agent]
+sha256 = "<sha256 hex of the agent's token>"
+policy = "read-only"
+writes_per_hour = 60
+note = "what this token is for"
 ```
+
+Kill switches: top-level `enabled = false` (everything), `enabled = false` on a
+policy (every token using it), or on a token (just that one). All of them block
+reads as well as writes.
 
 ## Setup
 

@@ -1,7 +1,7 @@
 """The HTTP API agents call.
 
 Every /v1 request is authenticated by an agent's bearer token, which selects a
-policy profile. Reads are filtered by the profile's read policy; writes are
+named token, which selects a policy. Reads are filtered by that policy's read rules; writes are
 checked entity by entity against its allow rules before anything reaches HA.
 """
 
@@ -11,6 +11,7 @@ import time
 from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, tzinfo
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo
@@ -24,7 +25,7 @@ from . import history
 from .audit import Audit
 from .config import Settings
 from .ha import HA, Catalog, HAError
-from .policy import Denied, Policy, Profile, parse
+from .policy import AccessConfig, AccessPolicy, Denied, Token, parse
 
 # Attributes that are noise for an agent or duplicated elsewhere in the view.
 DROPPED_ATTRIBUTES = {
@@ -73,6 +74,17 @@ class ServiceCall(BaseModel):
     )
 
 
+@dataclass(frozen=True)
+class Caller:
+    """An authenticated request's token and the policy it gets."""
+
+    token: Token
+    policy: AccessPolicy
+
+    def who(self) -> dict[str, str]:
+        return {"token": self.token.name, "policy": self.policy.name}
+
+
 class RateLimiter:
     def __init__(self) -> None:
         self._calls: dict[str, deque[float]] = {}
@@ -89,7 +101,7 @@ class RateLimiter:
 
 
 def create_app(settings: Settings) -> FastAPI:
-    policy: Policy = parse(settings.policy)
+    config: AccessConfig = parse(settings.policy)
     ha = HA(settings.ha_url, settings.ha_token)
     audit = Audit(ha, settings.alert_service)
     limiter = RateLimiter()
@@ -108,7 +120,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     app = FastAPI(
         title="Home bridge",
-        version="0.2.0",
+        version="0.3.0",
         description=DESCRIPTION,
         servers=[{"url": settings.public_url}],
         lifespan=lifespan,
@@ -123,27 +135,30 @@ def create_app(settings: Settings) -> FastAPI:
     async def agent(
         request: Request,
         creds: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
-    ) -> Profile:
-        profile = policy.profile_for_token(creds.credentials) if creds else None
-        if profile is None:
+    ) -> Caller:
+        token = config.token_for(creds.credentials) if creds else None
+        if token is None:
             audit.record(event="auth_failed", path=request.url.path)
             await audit.alert(
                 "auth_failed",
                 f"Rejected a request with a bad token: {request.url.path}",
             )
             raise HTTPException(401, "missing or invalid token")
-        if not policy.enabled or not profile.enabled:
-            audit.record(event="disabled", agent=profile.name, path=request.url.path)
+        caller = Caller(token, config.policy_for(token))
+        if not config.active(token):
+            audit.record(event="disabled", **caller.who(), path=request.url.path)
             raise HTTPException(403, "agent access is disabled")
-        return profile
+        return caller
 
-    Agent = Annotated[Profile, Depends(agent)]
+    Agent = Annotated[Caller, Depends(agent)]
 
     def tz() -> tzinfo:
         return state["tz"]
 
-    def readable(profile: Profile, catalog: Catalog, entity_id: str) -> bool:
-        return profile.read.allows(entity_id, catalog.entity_integration.get(entity_id))
+    def readable(caller: Caller, catalog: Catalog, entity_id: str) -> bool:
+        return caller.policy.read.allows(
+            entity_id, catalog.entity_integration.get(entity_id)
+        )
 
     def view(raw: dict[str, Any], catalog: Catalog) -> dict[str, Any]:
         entity_id = raw["entity_id"]
@@ -182,7 +197,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.get("/v1/areas", summary="List rooms and how many visible entities each has")
     async def areas(
-        profile: Agent,
+        caller: Agent,
         include_diagnostic: Annotated[
             bool,
             Query(
@@ -200,7 +215,7 @@ def create_app(settings: Settings) -> FastAPI:
             visible = [
                 e
                 for e in catalog.entities_in(area_id)
-                if readable(profile, catalog, e)
+                if readable(caller, catalog, e)
                 and catalog.listed(e, include_diagnostic)
             ]
             domains = sorted({e.split(".", 1)[0] for e in visible})
@@ -216,7 +231,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.get("/v1/entities", summary="List entities with their current state")
     async def entities(
-        profile: Agent,
+        caller: Agent,
         area: Annotated[str | None, Query(description="Area name or id")] = None,
         domain: Annotated[
             str | None, Query(description="e.g. light, sensor, climate, cover")
@@ -246,7 +261,7 @@ def create_app(settings: Settings) -> FastAPI:
         rows = []
         for raw in await ha.states():
             entity_id = raw["entity_id"]
-            if not readable(profile, catalog, entity_id) or not catalog.listed(
+            if not readable(caller, catalog, entity_id) or not catalog.listed(
                 entity_id, include_diagnostic
             ):
                 continue
@@ -261,10 +276,10 @@ def create_app(settings: Settings) -> FastAPI:
         rows.sort(key=lambda r: (r.get("area") or "~", r["entity_id"]))
         return {"total": len(rows), "entities": rows[offset : offset + limit]}
 
-    async def visible_state(profile: Profile, entity_id: str) -> dict[str, Any]:
+    async def visible_state(caller: Caller, entity_id: str) -> dict[str, Any]:
         catalog = await ha.catalog()
         raw = (
-            await ha.state(entity_id) if readable(profile, catalog, entity_id) else None
+            await ha.state(entity_id) if readable(caller, catalog, entity_id) else None
         )
         if raw is None:  # same answer for excluded and missing: reveal nothing
             raise HTTPException(404, f"no entity {entity_id}")
@@ -272,10 +287,10 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.get("/v1/entities/{entity_id}", summary="One entity's current state")
     async def entity(
-        profile: Agent,
+        caller: Agent,
         entity_id: Annotated[str, Path(pattern=r"^[a-z0-9_]+\.[a-z0-9_]+$")],
     ) -> dict[str, Any]:
-        return await visible_state(profile, entity_id)
+        return await visible_state(caller, entity_id)
 
     @app.get(
         "/v1/history",
@@ -288,7 +303,7 @@ def create_app(settings: Settings) -> FastAPI:
         ),
     )
     async def entity_history(
-        profile: Agent,
+        caller: Agent,
         entity_id: Annotated[str, Query(pattern=r"^[a-z0-9_]+\.[a-z0-9_]+$")],
         start: Annotated[str, Query(description="e.g. '-12h' or '2026-10-08T19:00'")],
         end: Annotated[str, Query()] = "now",
@@ -297,7 +312,7 @@ def create_app(settings: Settings) -> FastAPI:
             Query(description="Summarize into buckets, e.g. '15m', '1h', '1d'"),
         ] = None,
     ) -> dict[str, Any]:
-        item = await visible_state(profile, entity_id)
+        item = await visible_state(caller, entity_id)
         begin, finish, now = await time_range(start, end)
         try:
             step = history.parse_bucket(bucket) if bucket else None
@@ -327,7 +342,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.get("/v1/logbook", summary="Human-readable events (who/what changed when)")
     async def logbook(
-        profile: Agent,
+        caller: Agent,
         start: Annotated[str, Query(description="e.g. '-24h'")],
         end: Annotated[str, Query()] = "now",
         entity_id: Annotated[
@@ -336,13 +351,13 @@ def create_app(settings: Settings) -> FastAPI:
         limit: Annotated[int, Query(ge=1, le=500)] = 200,
     ) -> dict[str, Any]:
         catalog = await ha.catalog()
-        if entity_id and not readable(profile, catalog, entity_id):
+        if entity_id and not readable(caller, catalog, entity_id):
             raise HTTPException(404, f"no entity {entity_id}")
         begin, finish, _ = await time_range(start, end)
         entries = []
         for e in await ha.logbook(begin, finish, entity_id):
             subject = e.get("entity_id")
-            if subject and not readable(profile, catalog, subject):
+            if subject and not readable(caller, catalog, subject):
                 continue
             entries.append(
                 {
@@ -360,15 +375,15 @@ def create_app(settings: Settings) -> FastAPI:
         return {"total": len(entries), "entries": entries[-limit:]}
 
     @app.get("/v1/services", summary="Actions this agent may take, and their limits")
-    async def services(profile: Agent) -> list[dict[str, Any]]:
+    async def services(caller: Agent) -> list[dict[str, Any]]:
         catalog = await ha.catalog()
         present = [s["entity_id"] for s in await ha.states()]
         out = []
-        for rule in profile.rules:
+        for rule in caller.policy.rules:
             targets = sorted(
                 e
                 for e in present
-                if rule.entities.matches(e) and readable(profile, catalog, e)
+                if rule.entities.matches(e) and readable(caller, catalog, e)
             )
             for service in sorted(rule.services):
                 domain = service.split(".", 1)[0]
@@ -390,7 +405,7 @@ def create_app(settings: Settings) -> FastAPI:
         ),
     )
     async def call_service(
-        profile: Agent,
+        caller: Agent,
         domain: Annotated[str, Path(pattern=r"^[a-z0-9_]+$")],
         service: Annotated[str, Path(pattern=r"^[a-z0-9_]+$")],
         call: ServiceCall,
@@ -398,16 +413,18 @@ def create_app(settings: Settings) -> FastAPI:
         name = f"{domain}.{service}"
         requested = _as_list(call.entity_id)
         areas = _as_list(call.area)
-        record = {"event": "write", "agent": profile.name, "service": name}
+        record = {"event": "write", **caller.who(), "service": name}
 
         async def deny(message: str, status: int = 403) -> HTTPException:
             audit.record(
                 **record, decision="denied", reason=message, entities=requested
             )
-            await audit.alert("denied", f"{profile.name}: denied {name}: {message}")
+            await audit.alert(
+                "denied", f"{caller.token.name}: denied {name}: {message}"
+            )
             return HTTPException(status, message)
 
-        if name not in profile.services():
+        if name not in caller.policy.services():
             raise await deny(f"{name} is not allowed; see /v1/services for what is")
         if not requested and not areas:
             raise HTTPException(422, "give entity_id and/or area")
@@ -416,7 +433,7 @@ def create_app(settings: Settings) -> FastAPI:
 
         targets: list[str] = []
         for entity_id in requested:
-            if entity_id not in present or not readable(profile, catalog, entity_id):
+            if entity_id not in present or not readable(caller, catalog, entity_id):
                 raise HTTPException(404, f"no entity {entity_id}")
             targets.append(entity_id)
         skipped: list[str] = []
@@ -428,10 +445,10 @@ def create_app(settings: Settings) -> FastAPI:
                 if (
                     not entity_id.startswith(f"{domain}.")
                     or entity_id not in present
-                    or not readable(profile, catalog, entity_id)  # never reveal
+                    or not readable(caller, catalog, entity_id)  # never reveal
                 ):
                     continue
-                if profile.entity_allowed(name, entity_id):
+                if caller.policy.entity_allowed(name, entity_id):
                     targets.append(entity_id)
                 else:
                     skipped.append(entity_id)
@@ -443,18 +460,19 @@ def create_app(settings: Settings) -> FastAPI:
             )
         try:
             for entity_id in targets:
-                profile.check_write(name, entity_id, call.data)
+                caller.policy.check_write(name, entity_id, call.data)
         except Denied as err:
             raise await deny(str(err)) from err
-        if not limiter.allow(profile.name, profile.writes_per_hour):
+        if not limiter.allow(caller.token.name, caller.token.writes_per_hour):
             raise await deny(
-                f"write limit reached ({profile.writes_per_hour} per hour)", status=429
+                f"write limit reached ({caller.token.writes_per_hour} per hour)",
+                status=429,
             )
 
         await ha.call_service(domain, service, {**call.data, "entity_id": targets})
         audit.record(**record, decision="allowed", entities=targets, data=call.data)
         await audit.write_event(
-            agent=profile.name, service=name, entities=targets, data=call.data
+            **caller.who(), service=name, entities=targets, data=call.data
         )
         return {"called": name, "entities": targets, "skipped": skipped}
 
