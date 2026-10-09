@@ -1,0 +1,35 @@
+[project]
+name = "agent-bridge"
+version = "0.1.0"
+description = "Policy-enforcing HTTP API that lets AI agents reach Home Assistant"
+requires-python = ">=3.13"
+dependencies = [
+  "fastapi==0.141.1",
+  "uvicorn==0.53.0",
+  "httpx==0.28.1",
+  "websockets==17.1",
+  "tzdata==2026.4",
+]
+
+[dependency-groups]
+dev = ["pytest==9.1.1"]
+
+[tool.uv]
+package = false
+# Only resolve releases at least two weeks old (supply-chain delay).
+exclude-newer = "2026-09-25T00:00:00Z"
+
+[tool.pytest.ini_options]
+pythonpath = ["agent_bridge/src", "."]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 88
+
+[tool.ruff.lint]
+extend-select = ["I", "B", "UP", "SIM", "S"]
+ignore = ["S101"]  # asserts are fine in tests
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106"]  # fake tokens in fixtures

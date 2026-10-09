@@ -1,0 +1,35 @@
+name: Agent Bridge
+version: "0.1.0"
+slug: agent_bridge
+description: >-
+  Policy-enforcing API that lets AI agents read and control Home Assistant
+  through a Cloudflare Tunnel, without holding an HA credential.
+url: https://github.com/ssw/ha-agent-bridge
+arch:
+  - aarch64
+  - amd64
+startup: application
+boot: auto
+# The base image runs s6-overlay as PID 1.
+init: false
+# Deliberately no Supervisor-granted HA access (that token is admin-level);
+# the bridge uses its own non-admin user's token from the options below.
+homeassistant_api: false
+hassio_api: false
+host_network: false
+options:
+  ha_url: http://homeassistant:8123
+  ha_token: ""
+  tunnel_token: ""
+  public_url: https://ha-bridge.example.com
+  alert_service: persistent_notification.create
+  log_level: info
+  policy: ""
+schema:
+  ha_url: url
+  ha_token: password
+  tunnel_token: password
+  public_url: url
+  alert_service: str
+  log_level: list(debug|info|warning|error)
+  policy: str
