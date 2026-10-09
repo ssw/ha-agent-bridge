@@ -1,5 +1,7 @@
 """Tokens, the kill switch, and policy validation."""
 
+import json
+
 import pytest
 from agent_bridge.policy import PolicyError, parse
 
@@ -141,3 +143,67 @@ def test_disabling_a_policy_blocks_every_token_using_it(ha):
         assert client.get("/v1/areas", headers=MUSE).status_code == 403
         assert client.get("/v1/areas", headers=TABLET).status_code == 403
         assert client.get("/v1/areas", headers=READER).status_code == 200
+
+
+CLOUDFLARE = {
+    "CF-Connecting-IP": "203.0.113.7",
+    "CF-IPCountry": "US",
+    "User-Agent": "Python-urllib/3.13",
+}
+
+
+def test_bad_token_alerts_say_where_the_request_came_from(client, ha):
+    client.get("/v1/areas", headers=CLOUDFLARE | auth("guess"))
+    (alert,) = ha.service_calls("persistent_notification.create")
+    assert alert["message"] == (
+        "Rejected a request with a bad token: /v1/areas from 203.0.113.7 (US), "
+        "user agent 'Python-urllib/3.13'"
+    )
+
+
+def test_every_request_is_audited_with_token_and_client(client, caplog):
+    caplog.set_level("INFO", logger="agent_bridge.audit")
+    client.get("/v1/areas", headers=CLOUDFLARE | MUSE)
+    client.get("/v1/areas", headers=CLOUDFLARE)
+    lines = [json.loads(r.getMessage()) for r in caplog.records]
+    requests = [r for r in lines if r["event"] == "request"]
+    assert requests == [
+        {
+            "event": "request",
+            "method": "GET",
+            "path": "/v1/areas",
+            "query": None,
+            "status": 200,
+            "ms": requests[0]["ms"],
+            "token": "sam-muse",
+            "ip": "203.0.113.7",
+            "country": "US",
+            "ua": "Python-urllib/3.13",
+        },
+        {
+            "event": "request",
+            "method": "GET",
+            "path": "/v1/areas",
+            "query": None,
+            "status": 401,
+            "ms": requests[1]["ms"],
+            "token": None,
+            "ip": "203.0.113.7",
+            "country": "US",
+            "ua": "Python-urllib/3.13",
+        },
+    ]
+    # tokens never appear in the audit log
+    assert not any("muse-token" in r.getMessage() for r in caplog.records)
+
+
+def test_denied_write_alerts_include_the_client(client, ha):
+    client.post(
+        "/v1/services/lock/unlock",
+        json={"entity_id": "lock.entryway_front_door_lock"},
+        headers=CLOUDFLARE | MUSE,
+    )
+    (alert,) = ha.service_calls("persistent_notification.create")
+    assert alert["message"].endswith(
+        "(from 203.0.113.7 (US), user agent 'Python-urllib/3.13')"
+    )

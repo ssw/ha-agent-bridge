@@ -36,6 +36,7 @@ def test_dim_a_light(client, ha):
                 "service": "light.turn_on",
                 "entities": ["light.big_general_downlights"],
                 "data": {"brightness_pct": 40},
+                "ip": "testclient",  # no Cloudflare header in tests
             },
         )
     ]

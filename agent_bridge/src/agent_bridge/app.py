@@ -11,7 +11,7 @@ import time
 from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, tzinfo
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo
@@ -80,6 +80,7 @@ class Caller:
 
     token: Token
     policy: AccessPolicy
+    client: dict[str, str] = field(default_factory=dict)
 
     def who(self) -> dict[str, str]:
         return {"token": self.token.name, "policy": self.policy.name}
@@ -120,13 +121,33 @@ def create_app(settings: Settings) -> FastAPI:
 
     app = FastAPI(
         title="Home bridge",
-        version="0.3.0",
+        version="0.3.1",
         description=DESCRIPTION,
         servers=[{"url": settings.public_url}],
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
     )
+
+    @app.middleware("http")
+    async def audit_requests(request: Request, call_next):
+        """One audit line per API request: who, from where, what, outcome."""
+        if not request.url.path.startswith("/v1/"):
+            return await call_next(request)
+        started = time.monotonic()
+        response = await call_next(request)
+        token = getattr(request.state, "token", None)
+        audit.record(
+            event="request",
+            method=request.method,
+            path=request.url.path,
+            query=str(request.url.query) or None,
+            status=response.status_code,
+            ms=round((time.monotonic() - started) * 1000),
+            token=token.name if token else None,
+            **client(request),
+        )
+        return response
 
     @app.exception_handler(HAError)
     async def ha_error(_: Request, err: HAError) -> JSONResponse:
@@ -138,13 +159,16 @@ def create_app(settings: Settings) -> FastAPI:
     ) -> Caller:
         token = config.token_for(creds.credentials) if creds else None
         if token is None:
-            audit.record(event="auth_failed", path=request.url.path)
+            seen = client(request)
+            audit.record(event="auth_failed", path=request.url.path, **seen)
             await audit.alert(
                 "auth_failed",
-                f"Rejected a request with a bad token: {request.url.path}",
+                f"Rejected a request with a bad token: {request.url.path} "
+                f"from {describe(seen)}",
             )
             raise HTTPException(401, "missing or invalid token")
-        caller = Caller(token, config.policy_for(token))
+        request.state.token = token
+        caller = Caller(token, config.policy_for(token), client(request))
         if not config.active(token):
             audit.record(event="disabled", **caller.who(), path=request.url.path)
             raise HTTPException(403, "agent access is disabled")
@@ -413,14 +437,16 @@ def create_app(settings: Settings) -> FastAPI:
         name = f"{domain}.{service}"
         requested = _as_list(call.entity_id)
         areas = _as_list(call.area)
-        record = {"event": "write", **caller.who(), "service": name}
+        record = {"event": "write", **caller.who(), "service": name, **caller.client}
 
         async def deny(message: str, status: int = 403) -> HTTPException:
             audit.record(
                 **record, decision="denied", reason=message, entities=requested
             )
             await audit.alert(
-                "denied", f"{caller.token.name}: denied {name}: {message}"
+                "denied",
+                f"{caller.token.name}: denied {name}: {message} "
+                f"(from {describe(caller.client)})",
             )
             return HTTPException(status, message)
 
@@ -472,7 +498,11 @@ def create_app(settings: Settings) -> FastAPI:
         await ha.call_service(domain, service, {**call.data, "entity_id": targets})
         audit.record(**record, decision="allowed", entities=targets, data=call.data)
         await audit.write_event(
-            **caller.who(), service=name, entities=targets, data=call.data
+            **caller.who(),
+            service=name,
+            entities=targets,
+            data=call.data,
+            ip=caller.client.get("ip"),
         )
         return {"called": name, "entities": targets, "skipped": skipped}
 
@@ -500,3 +530,28 @@ def _small(value: Any) -> bool:
     if isinstance(value, str):
         return len(value) <= MAX_ATTRIBUTE_CHARS
     return True
+
+
+MAX_USER_AGENT = 160
+
+
+def client(request: Request) -> dict[str, str]:
+    """Where a request came from, as Cloudflare saw it.
+
+    The bridge only listens on localhost behind cloudflared, and Cloudflare
+    overwrites CF-Connecting-IP, so the header can't be spoofed by a client.
+    """
+    out = {
+        "ip": request.headers.get("cf-connecting-ip")
+        or (request.client.host if request.client else "unknown"),
+        "country": request.headers.get("cf-ipcountry"),
+        "ua": request.headers.get("user-agent", "")[:MAX_USER_AGENT] or None,
+    }
+    return {k: v for k, v in out.items() if v}
+
+
+def describe(seen: dict[str, str]) -> str:
+    where = seen.get("ip", "unknown")
+    if seen.get("country"):
+        where += f" ({seen['country']})"
+    return f"{where}, user agent {seen.get('ua', 'none')!r}"

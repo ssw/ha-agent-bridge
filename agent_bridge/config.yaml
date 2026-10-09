@@ -1,5 +1,5 @@
 name: Agent Bridge
-version: "0.3.0"
+version: "0.3.1"
 slug: agent_bridge
 description: >-
   Policy-enforcing API that lets AI agents read and control Home Assistant

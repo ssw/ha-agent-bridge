@@ -27,8 +27,10 @@ policy:
   everything in the garage" can't reach a garage door the policy excludes.
 - **Named tokens** each point at a named policy; only SHA-256 hashes are stored,
   and every log line, event and alert says which token was used.
-- **Audit**: every request is logged; every write fires an
-  `agent_bridge_call` event in HA; denied writes and bad tokens raise an alert.
+- **Audit**: every request is logged with its token, client IP, country and
+  User-Agent (from Cloudflare's headers); every write fires an
+  `agent_bridge_call` event in HA; denied writes and bad tokens raise an alert
+  that says where the request came from.
 - **Kill switches** globally, per policy or per token; they block reads too.
 
 ## API
