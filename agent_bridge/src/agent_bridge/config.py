@@ -18,6 +18,9 @@ class Settings:
     public_url: str = "http://localhost:8099"
     alert_service: str = "persistent_notification.create"
     log_level: str = "info"
+    # Match HA's recorder `purge_keep_days` (HA's default is 10). Older
+    # history comes from long-term statistics, which only numbers have.
+    history_days: int = 10
     listen_host: str = "127.0.0.1"
     listen_port: int = 8099
 
@@ -35,4 +38,5 @@ def load() -> Settings:
         public_url=get("public_url", "http://localhost:8099"),
         alert_service=get("alert_service", "persistent_notification.create"),
         log_level=get("log_level", "info"),
+        history_days=int(get("history_days", "10")),
     )

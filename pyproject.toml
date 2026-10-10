@@ -1,6 +1,6 @@
 [project]
 name = "agent-bridge"
-version = "0.3.1"
+version = "0.4.0"
 description = "Policy-enforcing HTTP API that lets AI agents reach Home Assistant"
 requires-python = ">=3.13"
 dependencies = [

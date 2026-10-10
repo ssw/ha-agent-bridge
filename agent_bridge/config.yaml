@@ -1,5 +1,5 @@
 name: Agent Bridge
-version: "0.3.1"
+version: "0.4.0"
 slug: agent_bridge
 description: >-
   Policy-enforcing API that lets AI agents read and control Home Assistant
@@ -24,6 +24,7 @@ options:
   public_url: https://ha-bridge.example.com
   alert_service: persistent_notification.create
   log_level: info
+  history_days: 10
   policy: ""
 schema:
   ha_url: url
@@ -32,4 +33,5 @@ schema:
   public_url: url
   alert_service: str
   log_level: list(debug|info|warning|error)
+  history_days: int(1,3650)
   policy: str

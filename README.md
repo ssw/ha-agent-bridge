@@ -51,8 +51,10 @@ Listings leave out Home Assistant's diagnostic and configuration entities
 they stay readable directly and through history.
 
 Times accept `now`, relative offsets like `-12h` / `-7d`, or ISO 8601 (local
-time when no offset is given). Ranges older than 10 days are served from HA's
-long-term statistics.
+time when no offset is given). Ranges older than `history_days` (default 10,
+HA's own default) are served from HA's long-term statistics, which only numeric
+sensors have. If you raise HA's recorder `purge_keep_days`, set `history_days`
+to match so on/off and other non-numeric history stays reachable that far back.
 
 ## Policy
 

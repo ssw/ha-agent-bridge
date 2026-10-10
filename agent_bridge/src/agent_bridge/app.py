@@ -121,7 +121,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     app = FastAPI(
         title="Home bridge",
-        version="0.3.1",
+        version="0.4.0",
         description=DESCRIPTION,
         servers=[{"url": settings.public_url}],
         lifespan=lifespan,
@@ -321,9 +321,9 @@ def create_app(settings: Settings) -> FastAPI:
         summary="An entity's history over a time range",
         description=(
             "Numeric sensors can be summarized into buckets (min/mean/max). Ranges "
-            "older than 10 days come from long-term hourly/daily statistics. "
-            "Times: 'now', relative like '-12h' or '-7d', or ISO 8601 (local if no "
-            "offset)."
+            f"older than {settings.history_days} days come from long-term "
+            "hourly/daily statistics, which only numeric sensors have. Times: "
+            "'now', relative like '-12h' or '-7d', or ISO 8601 (local if no offset)."
         ),
     )
     async def entity_history(
@@ -349,7 +349,7 @@ def create_app(settings: Settings) -> FastAPI:
             "start": begin.astimezone(tz()).isoformat(),
             "end": finish.astimezone(tz()).isoformat(),
         }
-        if history.needs_statistics(begin, now):
+        if history.needs_statistics(begin, now, settings.history_days):
             step = step or history.auto_bucket(begin, finish)
             rows = await ha.statistics(
                 entity_id, begin, finish, history.statistics_period(step)
@@ -358,7 +358,7 @@ def create_app(settings: Settings) -> FastAPI:
                 raise HTTPException(
                     404,
                     f"no long-term statistics for {entity_id} before the last "
-                    f"{history.RAW_HISTORY_DAYS} days",
+                    f"{settings.history_days} days",
                 )
             return base | history.summarize_statistics(rows, tz())
         rows = await ha.history(entity_id, begin, finish)

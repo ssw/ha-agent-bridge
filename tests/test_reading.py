@@ -2,7 +2,7 @@
 
 from datetime import timedelta
 
-from tests.conftest import MUSE
+from tests.conftest import MUSE, bridge
 
 
 def test_openapi_describes_the_api_without_a_token(client):
@@ -117,6 +117,46 @@ def test_last_month_comes_from_long_term_statistics(client):
         body["buckets"][0] | {"min": 68.0, "mean": 70.0, "max": 72.0}
         == body["buckets"][0]
     )
+
+
+THREE_WEEKS_AGO = {
+    "entity_id": "cover.garage_garage_door",
+    "start": "-22d",
+    "end": "-20d",
+}
+
+
+def test_on_off_history_beyond_ha_default_retention_is_unavailable(client):
+    # HA keeps 10 days by default, and a door has no long-term statistics.
+    response = client.get("/v1/history", params=THREE_WEEKS_AGO, headers=MUSE)
+    assert response.status_code == 404
+    assert "before the last 10 days" in response.json()["detail"]
+
+
+def test_longer_retention_reaches_older_on_off_history(ha):
+    # A house whose recorder keeps 90 days: when was the garage open?
+    ha.reset()
+    with bridge(ha, history_days=90) as client:
+        body = client.get("/v1/history", params=THREE_WEEKS_AGO, headers=MUSE).json()
+    assert [c["state"] for c in body["changes"]] == ["closed", "open", "closed"]
+
+
+def test_numbers_older_than_the_retention_still_come_from_statistics(ha):
+    ha.reset()
+    with bridge(ha, history_days=90) as client:
+        body = client.get(
+            "/v1/history",
+            params={
+                "entity_id": "sensor.baby_room_sensor_temperature",
+                "start": "-120d",
+                "end": "-100d",
+                "bucket": "1d",
+            },
+            headers=MUSE,
+        )
+    # The scenario's statistics only cover the last 30 days.
+    assert body.status_code == 404
+    assert "before the last 90 days" in body.json()["detail"]
 
 
 def test_history_of_an_excluded_entity_is_not_found(client):

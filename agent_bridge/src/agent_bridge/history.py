@@ -11,8 +11,6 @@ import re
 from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any
 
-# HA keeps detailed history for 10 days by default; beyond that, statistics.
-RAW_HISTORY_DAYS = 10
 MAX_RAW_POINTS = 300
 MAX_CHANGES = 200
 TARGET_BUCKETS = 48
@@ -71,8 +69,9 @@ def auto_bucket(start: datetime, end: datetime) -> timedelta:
     return BUCKET_LADDER[-1]
 
 
-def needs_statistics(start: datetime, now: datetime) -> bool:
-    return start < now - timedelta(days=RAW_HISTORY_DAYS)
+def needs_statistics(start: datetime, now: datetime, raw_days: int) -> bool:
+    """Older than HA keeps detailed history (its recorder's purge_keep_days)."""
+    return start < now - timedelta(days=raw_days)
 
 
 def statistics_period(bucket: timedelta) -> str:

@@ -86,6 +86,12 @@ def scenario(now: datetime) -> House:
             (now - timedelta(hours=10), "off"),
             (now - timedelta(hours=3), "on"),
         ],
+        # Opened for ten minutes, three weeks ago.
+        "cover.garage_garage_door": [
+            (now - timedelta(days=30), "closed"),
+            (now - timedelta(days=21), "open"),
+            (now - timedelta(days=21) + timedelta(minutes=10), "closed"),
+        ],
     }
     hour = timedelta(hours=1)
     stats_start = now - timedelta(days=30)
@@ -264,12 +270,13 @@ def ha(now: datetime) -> Iterator[FakeHA]:
     fake.stop()
 
 
-def bridge(ha: FakeHA, policy: str = POLICY) -> TestClient:
+def bridge(ha: FakeHA, policy: str = POLICY, history_days: int = 10) -> TestClient:
     settings = Settings(
         ha_url=ha.url,
         ha_token=HA_TOKEN,
         policy=policy,
         public_url="https://ha-bridge.example.test",
+        history_days=history_days,
     )
     return TestClient(create_app(settings))
 
